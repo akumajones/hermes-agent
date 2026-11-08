@@ -208,6 +208,8 @@ code_execution:
 
 **Large output.** Stdout over 50 KB is shown head-and-tail inline, and the full text is saved under `~/.hermes/cache/exec/` with the path included in the result, so the agent can page through it with `read_file` instead of re-running the script.
 
+**Errors.** A cell exception is `failure_class: command`. `error` is one line beginning with `command failure:` and the exception type, so a short log preview still shows the type. `traceback` is the sanitized traceback; when it is capped, the tail (the exception line) is kept. `diagnostics_incomplete` is true when that line was not captured. A failure while formatting the reply is `postprocessing` and keeps a nested `command_failure` when the cell had already raised. A kernel that dies before the reply is `transport`. Secrets in those fields are redacted.
+
 ## How Tool Calls Work Inside Scripts
 
 When your script calls a function like `web_search("query")`:

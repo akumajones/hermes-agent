@@ -1951,20 +1951,20 @@ DEFAULT_CONFIG = {
         # profile with a cross-process file lock.
         "turn_wait_seconds": 120,
     },
-    "code_execution": {  # execute_code settings (programmatic tool calls).
-        # project = run in the session cwd with the active venv/conda python so project deps and
-        # relative paths resolve. strict = isolated temp dir with hermes-agent's own python
-        # (sys.executable): max isolation, project deps/relative paths won't work. Env scrubbing
-        # (*_API_KEY, *_TOKEN, *_SECRET, ...) and the tool whitelist apply in both modes.
+    "external_email": {
+        # Opt-in. False leaves replies unchanged. True rewrites a final reply that
+        # claims an external email was sent unless this turn's tool results include
+        # a matching provider-acceptance receipt. Inbox delivery is never verified.
+        # Missing, failed, and ambiguous outcomes are not reported as sent and are
+        # not retried. The reply is held until the check runs.
+        "enforce_completion_claims": False,
+        # A receipt counts only when the terminal command or execute_code source
+        # matches one prefix (leading VAR=value assignments ignored). Empty: no
+        # shell or tool print is a verified send.
+        "receipt_command_prefixes": [],
+    },
+    "code_execution": {  # execute_code settings. mode: project (cwd/venv) | strict (temp dir).
         "mode": "project",
-        # Session kernels are always on locally (`kernel_mode` is ignored) and remotely
-        # (tools/code_kernel_remote.py; a backend that cannot spawn a kernel fails open to
-        # per-call). One kernel per (session owner, mode, interpreter, cwd, tool-set) keeps state
-        # across calls and turns; subagents get their own. Kernels die with the session, after
-        # kernel_idle_timeout idle seconds, or by LRU eviction past max_session_kernels. A
-        # timed-out/interrupted cell kills the kernel; env is frozen at spawn (reset=true after
-        # changing passthrough). Tool RPC authority (approval, session, allow-list, call budget) is
-        # rebound per cell — that runtime boundary is the cross-cell enforcement.
         "kernel_idle_timeout": 1800,
         "max_session_kernels": 4,
     },

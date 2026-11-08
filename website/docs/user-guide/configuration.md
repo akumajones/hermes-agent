@@ -2848,6 +2848,33 @@ code_execution:
 
 Environment scrubbing (strips `*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_CREDENTIAL`, `*_PASSWD`, `*_AUTH`) and the tool whitelist apply identically in both modes — switching mode does not change the security posture.
 
+A cell that raises is a **command** failure: the result's `error` line starts with `command failure:` and `exception_type`, and `traceback` keeps the sanitized traceback (the tail is kept when it is capped). A failure while Hermes formats that result is **postprocessing** and does not discard a command failure already captured (`command_failure`). A kernel that dies before the reply arrives is **transport**. `diagnostics_incomplete` means the exception line was not captured. These fields are redacted; they are not a guess at the type.
+
+## External email completion claims
+
+`external_email.enforce_completion_claims` defaults to false. Set it true to rewrite a final reply that claims an external email was sent unless this turn's tool results contain a matching provider-acceptance receipt. The reply is held until the check runs, so the claim is not streamed first. Missing, failed, and ambiguous outcomes are not reported as sent and are not retried. The check never calls a tool.
+
+Provider acceptance means the sender's provider took the message. It does not mean the message reached an inbox. A receipt that says otherwise is not treated as delivery.
+
+```yaml
+external_email:
+  enforce_completion_claims: false
+  # Optional. When non-empty, a receipt counts only if the terminal command
+  # (after leading VAR=value assignments) or the execute_code source starts
+  # with one of these prefixes, or the source quotes the prefix as an argument.
+  receipt_command_prefixes: []
+```
+
+The tool result must contain this object. Exit 0 alone is not acceptance. Prose such as "message sent" is not a receipt.
+
+```json
+{"hermes_external_email": {"version": 1, "outcome": "accepted", "acceptance": "provider", "recipient": "person@example.com", "transport": "smtp"}}
+```
+
+`outcome` is `accepted`, `failed`, or `ambiguous`. `acceptance` must be `provider` for a verified accept. `version` is the integer 1.
+
+`external_email.receipt_command_prefixes` is required for a receipt to count. An empty list verifies nothing: a shell command can print the JSON without sending mail, and arbitrary command output is not parsed as success. The phrase list that detects a claim is not a proof: a paraphrase that does not match it is left unchanged. Receipts from earlier turns do not verify a new claim.
+
 ## Web Search Backends
 
 The `web_search` and `web_extract` tools support five backend providers. Configure the backend in `config.yaml` or via `hermes tools`:

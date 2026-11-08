@@ -582,7 +582,13 @@ def _finish_remote_kernel_result(kernel_result: dict[str, Any], *,
     if result["status"] == "timeout":
         _apply_timeout(result, f"Cell timed out after {timeout}s; the remote session kernel was "
                                "killed and its state was lost. The next call starts fresh.")
+    elif result["status"] == "error" and (
+        kernel_result.get("traceback") or kernel_result.get("exception_type")
+    ):
+        from tools.code_execution_errors import command_failure_fields, place_failure_fields
+        result = place_failure_fields(result, command_failure_fields(kernel_result))
     elif result["status"] == "error" and kernel_result.get("error"):
+        result["failure_class"] = "command"
         result["error"] = kernel_result["error"]
     return json.dumps(result, ensure_ascii=False)
 

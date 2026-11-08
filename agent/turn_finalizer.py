@@ -506,8 +506,17 @@ def _apply_output_hooks(
     return final_response, transformed, pre_transform
 
 
+def _guard_external_email(agent, text, messages):
+    """Opt-in rewrite. Idempotent, and it never sends mail. Runs even when the plugin
+    transform for this turn was already recorded, because that record is not this check."""
+    from agent.external_email_guard import guard_reply
+
+    history = messages if messages is not None else getattr(agent, "_session_messages", None)
+    return guard_reply(text, history if isinstance(history, list) else None)
+
+
 def apply_llm_output_transform(
-    agent, final_response, *, turn_id, platform=None, logger=None,
+    agent, final_response, *, turn_id, platform=None, logger=None, messages=None,
 ) -> tuple[Any, bool, Optional[Any]]:
     """Fire ``transform_llm_output`` once per turn and return
     ``(final_response, transformed, pre_transform_response)``.
@@ -526,7 +535,9 @@ def apply_llm_output_transform(
     recorded = getattr(agent, "_llm_output_transform", None)
     if isinstance(recorded, tuple) and len(recorded) == 3 and recorded[0] == turn_id:
         _, transformed, pre_transform = recorded
-        return final_response, transformed, pre_transform
+        return _with_email_guard(
+            agent, final_response, messages, transformed=transformed, pre_transform=pre_transform,
+        )
     if not final_response:
         return final_response, False, None
     if platform is None:
@@ -544,6 +555,20 @@ def apply_llm_output_transform(
     if rewrite:
         pre_transform, final_response, transformed = final_response, rewrite, True
     agent._llm_output_transform = (turn_id, transformed, pre_transform)
+    return _with_email_guard(
+        agent, final_response, messages, transformed=transformed, pre_transform=pre_transform,
+    )
+
+
+def _with_email_guard(agent, final_response, messages, *, transformed, pre_transform):
+    """Apply the email check without a second plugin-hook firing."""
+    if not isinstance(final_response, str) or not final_response:
+        return final_response, transformed, pre_transform
+    guarded = _guard_external_email(agent, final_response, messages)
+    if isinstance(guarded, str) and guarded != final_response:
+        if pre_transform is None:
+            pre_transform = final_response
+        return guarded, True, pre_transform
     return final_response, transformed, pre_transform
 
 
@@ -576,7 +601,9 @@ def settle_held_final(agent, result: Any) -> None:
     recorded = getattr(agent, "_llm_output_transform", None)
     if not isinstance(text, str) or not text or (isinstance(recorded, tuple) and recorded[:1] == (turn_id,)):
         return
-    final, transformed, _ = apply_llm_output_transform(agent, text, turn_id=turn_id)
+    final, transformed, _ = apply_llm_output_transform(
+        agent, text, turn_id=turn_id, messages=result.get("messages"),
+    )
     if result.get("error") == text:  # keep the mirror an error card reads
         result["error"] = final
     result.update(final_response=final, response_transformed=transformed, pre_transform_response=None)
@@ -726,7 +753,9 @@ def finalize_turn(
         # user will see, never the raw model text (#44239).
         if final_response and not interrupted:
             _raw = final_response
-            final_response, _, _ = apply_llm_output_transform(agent, final_response, turn_id=turn_id, logger=logger)
+            final_response, _, _ = apply_llm_output_transform(
+                agent, final_response, turn_id=turn_id, logger=logger, messages=messages,
+            )
             _store_rewrite_on_tail(agent, messages, _raw, final_response)
         _close_transcript_tail(agent, messages, final_response, interrupted, _recovered_from_stream)
         if not interrupted and not failed and not vetoed:
