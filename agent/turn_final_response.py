@@ -392,7 +392,7 @@ def finish_text_response(
     _transformed = False
     if not getattr(agent, "_interrupt_requested", False):
         final_response, _transformed, _ = apply_llm_output_transform(
-            agent, final_response, turn_id=getattr(agent, "_current_turn_id", "") or "", logger=logger,
+            agent, final_response, turn_id=getattr(agent, "_current_turn_id", "") or "", logger=logger, messages=messages,
         )
     if _transformed:
         if _promoted:

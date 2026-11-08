@@ -81,6 +81,7 @@ def main():
             last_activity = time.time()
             execution_count += 1
             payload, _ = run_cell(request, execution_count)
+            _note_cell_exception(payload)
             res_name = name.replace("cell_req_", "cell_res_")
             tmp = os.path.join(CELLS, res_name + ".tmp")
             # Cell results carry the executed code's output: owner-only, even if
@@ -403,6 +404,10 @@ def _run_attached_cell(kernel: RemoteKernel, key: tuple, code: str, *, env, task
         "status": "error", "stdout": cell_payload.get("stdout", ""), "stderr": cell_payload.get("stderr", ""),
         "traceback": cell_payload.get("traceback", ""), "tool_calls_made": tool_call_counter[0], "kernel": kernel_info,
         "tool_errors": tool_errors_since(tool_call_log),
+        "exception_type": cell_payload.get("exception_type", ""),
+        "exception_message": cell_payload.get("exception_message", ""),
+        "exception_message_truncated": bool(cell_payload.get("exception_message_truncated")),
+        "traceback_truncated": bool(cell_payload.get("traceback_truncated")),
     }
     if cell_status in ("timeout", "protocol-error", "no-result"):
         # No safe way to interrupt one cell in place (same contract as local): kill, report, respawn.

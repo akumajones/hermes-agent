@@ -92,7 +92,9 @@ def collapse_continuation_trail(
         # A held turn showed none of these fragments: the stitched text reaches the user and the
         # stored row only through the turn's transform snapshot (fail closed: the withheld notice).
         from agent.turn_finalizer import apply_llm_output_transform
-        partial, _, _ = apply_llm_output_transform(agent, partial, turn_id=getattr(agent, "_current_turn_id", "") or "")
+        partial, _, _ = apply_llm_output_transform(
+            agent, partial, turn_id=getattr(agent, "_current_turn_id", "") or "", messages=messages,
+        )
     if partial:
         append_message(messages, {"role": "assistant", "content": partial, "finish_reason": finish_reason})
     agent._session_messages = messages

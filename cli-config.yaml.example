@@ -1865,6 +1865,21 @@ stt:
 # To disable, you would need to modify the source code.
 
 # =============================================================================
+# External email completion claims (opt-in, default off)
+# =============================================================================
+# When enforce_completion_claims is true, a final reply that says an external
+# email was sent is rewritten unless this turn's tool results contain a
+# matching provider-acceptance receipt. Inbox delivery is never treated as
+# verified. Missing, failed, and ambiguous outcomes are not reported as sent
+# and are not retried. The reply stream is held while the check is on.
+# receipt_command_prefixes is required for any receipt to count. Empty means
+# no shell or tool print is a verified send.
+# external_email:
+#   enforce_completion_claims: false
+#   receipt_command_prefixes: []
+#     # - /opt/mail/send
+
+# =============================================================================
 # Code Execution Sandbox (Programmatic Tool Calling)
 # =============================================================================
 # The execute_code tool runs Python scripts that call Hermes tools via RPC.

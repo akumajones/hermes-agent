@@ -52,17 +52,50 @@ def _clip(text):
     return (text, False) if len(text) <= _CAPTURE_LIMIT else (text[:_CAPTURE_LIMIT], True)
 
 
+def _bounded(text, cap):
+    """Keep the tail: the exception line is at the end of a traceback."""
+    if len(text) <= cap:
+        return text, False
+    head = int(cap * 0.4)
+    tail = cap - head
+    omitted = len(text) - head - tail
+    notice = "\\n... [truncated %d chars] ...\\n" % omitted
+    return text[:head] + notice + text[-tail:], True
+
+
+def _exception_fields(exc):
+    message, message_clipped = _bounded(str(exc), 4000)
+    trace, trace_clipped = _bounded(traceback.format_exc(), 200000)
+    return type(exc).__name__, message, message_clipped, trace, trace_clipped
+
+
+def _note_cell_exception(payload):
+    """One stderr line before the reply, so a failed reply still names the cell error."""
+    if payload.get("status") != "error" or not payload.get("exception_type"):
+        return
+    note = str(payload.get("exception_message") or "")
+    note = note.replace("\\n", " ").replace("\\r", " ")
+    sys.stderr.write(
+        "HERMES_CELL_EXCEPTION\\t%s\\t%s\\n" % (payload["exception_type"], note[:500])
+    )
+    sys.stderr.flush()
+
+
 def run_cell(request, execution_count):
     """Exec one cell; returns (response payload, FULL stdout text)."""
     out, err = io.StringIO(), io.StringIO()
     status, trace = "ok", ""
+    exc_type, exc_message = "", ""
+    exc_message_clipped = trace_clipped = False
     try:
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             exec(compile(request["code"], "<cell>", "exec"), GLOBALS)
     except SystemExit as exc:
         status, trace = "exit", "SystemExit: " + repr(exc.code)
-    except BaseException:
-        status, trace = "error", traceback.format_exc()
+        exc_type, exc_message = "SystemExit", repr(exc.code)
+    except BaseException as exc:
+        status = "error"
+        exc_type, exc_message, exc_message_clipped, trace, trace_clipped = _exception_fields(exc)
     stdout_text, stdout_clipped = _clip(out.getvalue())
     stderr_text, stderr_clipped = _clip(err.getvalue())
     return {
@@ -70,6 +103,9 @@ def run_cell(request, execution_count):
         "stdout": stdout_text, "stderr": stderr_text,
         "stdout_clipped": stdout_clipped, "stderr_clipped": stderr_clipped,
         "traceback": trace, "execution_count": execution_count,
+        "exception_type": exc_type, "exception_message": exc_message,
+        "exception_message_truncated": exc_message_clipped,
+        "traceback_truncated": trace_clipped,
     }, out.getvalue()
 '''
 
@@ -184,6 +220,7 @@ def main():
             _spill(full_stdout, "cell_%06d_stdout.txt" % execution_count)
             if payload["stdout_clipped"] else ""
         )
+        _note_cell_exception(payload)
         _reply(payload)
         if payload["status"] == "exit":
             break
@@ -251,21 +288,59 @@ class CellAuthority:
 
 
 class _BoundedBuffer:
-    """Byte chunks capped at a total size; ``drain`` returns text and resets."""
+    """Byte chunks capped at a total size; ``drain`` returns text and resets.
 
-    def __init__(self):
+    ``keep_tail`` retains a head and a rolling tail once ``cap`` is exceeded, so a
+    traceback's exception line is not the part discarded. Under the cap the text
+    is unchanged.
+    """
+
+    def __init__(self, *, keep_tail: bool = False):
         self.chunks: list[bytes] = []
         self.total = 0
+        self.keep_tail = keep_tail
+        self._tail = b""
+        self._omitted = 0
+        self._head_frozen = False
 
     def append(self, data: bytes, cap: int) -> None:
-        keep = data[: max(0, cap - self.total)]
-        if keep:
-            self.chunks.append(keep)
-            self.total += len(keep)
+        if not data:
+            return
+        if not self.keep_tail:
+            keep = data[: max(0, cap - self.total)]
+            if keep:
+                self.chunks.append(keep)
+                self.total += len(keep)
+            return
+        head_budget = max(1, int(cap * 0.4))
+        tail_budget = max(1, cap - head_budget)
+        if not self._head_frozen:
+            room = head_budget - self.total
+            if room > 0:
+                take = data[:room]
+                self.chunks.append(take)
+                self.total += len(take)
+                data = data[len(take):]
+            if data:
+                self._head_frozen = True
+        if data:
+            self._tail = (self._tail + data)[-tail_budget:]
+            self._omitted += len(data)
 
     def drain(self) -> str:
-        chunks, self.chunks, self.total = self.chunks, [], 0
-        return b"".join(chunks).decode("utf-8", errors="replace")
+        head = b"".join(self.chunks)
+        tail, omitted = self._tail, self._omitted
+        self.chunks, self.total = [], 0
+        self._tail, self._omitted, self._head_frozen = b"", 0, False
+        if not tail:
+            return head.decode("utf-8", errors="replace")
+        dropped = omitted - len(tail)
+        if dropped <= 0:
+            body = head + tail
+        else:
+            notice = f"\n\n... [STDERR TRUNCATED - {dropped} bytes omitted] ...\n\n".encode()
+            body = head + notice + tail
+        return body.decode("utf-8", errors="replace")
 
 
 class SessionKernel:
@@ -288,7 +363,7 @@ class SessionKernel:
         # Owned by a live delegate_task child: exempt from LRU eviction (the child's teardown disposes it).
         self.pinned: bool = False
         self.response_q: queue.Queue[dict] = queue.Queue()
-        self.raw, self.stderr = _BoundedBuffer(), _BoundedBuffer()
+        self.raw, self.stderr = _BoundedBuffer(), _BoundedBuffer(keep_tail=True)
         self.execution_count, self.last_used = 0, time.monotonic()
         self.cell_authority: Optional[CellAuthority] = None
 
@@ -776,16 +851,19 @@ def _cell_result(kernel: SessionKernel, key: tuple, status: str, payload: dict[s
     if status == "timeout":
         message = (f"Cell timed out after {timeout}s; the session kernel was killed and its "
                    "state was lost. The next execute_code call starts a fresh kernel.")
-        result.update(exit_code=-1, error=message,
+        result.update(exit_code=-1, failure_class="timeout", error=message,
                       output=(stdout_text + "\n\n⏰ " + message) if stdout_text else ("⏰ " + message))
     elif status == "interrupted":
         from tools.code_execution_tool import _format_interrupted_output
-        result.update(exit_code=-1, output=_format_interrupted_output(stdout_text),
+        result.update(exit_code=-1, failure_class="interrupted", output=_format_interrupted_output(stdout_text),
                       error="Interrupted; the session kernel was killed and its state was lost.")
     elif cell_status == "error":
-        trace = clean(str(payload.get("traceback", "")))
-        result.update(status="error", exit_code=1, error=trace or "Cell raised an exception.",
+        from tools.code_execution_errors import command_failure_fields, place_failure_fields
+        fields = command_failure_fields(payload)
+        trace = fields.get("traceback") or ""
+        result.update(status="error", exit_code=1,
                       output=_with_stderr(stdout_text, cell_stderr + trace) if (cell_stderr or trace) else stdout_text)
+        result = place_failure_fields(result, fields)
         hint = _sandbox_failure_hint(trace, enabled_tools=sandbox_tools)
         if hint:
             result["hint"] = hint
@@ -796,9 +874,10 @@ def _cell_result(kernel: SessionKernel, key: tuple, status: str, payload: dict[s
         if cell_stderr:
             result["output"] = _with_stderr(stdout_text, cell_stderr)
     elif status == "error":
+        from tools.code_execution_errors import place_failure_fields, transport_failure_fields
         _REGISTRY.discard(key, kernel)
-        result.update(exit_code=-1, error="The session kernel died while running the cell"
-                      + (": " + stderr_raw.strip() if stderr_raw.strip() else "."))
+        result.update(exit_code=-1)
+        result = place_failure_fields(result, transport_failure_fields(stderr_raw))
     elif cell_stderr:
         result["output"] = _with_stderr(stdout_text, cell_stderr)
     return result
@@ -837,6 +916,7 @@ def _run_cell(kernel: SessionKernel, key: tuple, code: str, *, task_id: str, chi
     # would get) and installed on the kernel so RPC dispatches under THIS cell's identity.
     authority = CellAuthority(task_id)
     with kernel.lock:
+        payload: dict = {}
         try:
             if kernel.proc is None:
                 _spawn(kernel, task_id=task_id, child_python=child_python, child_cwd=child_cwd,
@@ -850,19 +930,39 @@ def _run_cell(kernel: SessionKernel, key: tuple, code: str, *, task_id: str, chi
             kernel.proc.stdin.write((json.dumps({"id": uuid.uuid4().hex, "code": code}) + "\n").encode("utf-8"))
             kernel.proc.stdin.flush()
             status, payload = _await_cell(kernel, timeout, is_interrupted)
-            result = _cell_result(
-                kernel, key, status, payload,
-                timeout=timeout, sandbox_tools=sandbox_tools, reused=reused,
-                state_reset=state_reset, exec_start=exec_start,
-            )
-            return json.dumps(result, ensure_ascii=False)
-        except Exception as exc:  # pragma: no cover - defensive parity with per-call
-            from tools.code_execution_tool import _error_result
+        except Exception as exc:
+            from tools.code_execution_errors import dumps_result, host_exception_fields, place_failure_fields
             logger.error("session kernel failed: %s: %s", type(exc).__name__, exc, exc_info=True)
             _REGISTRY.discard(key, kernel)
-            return _error_result(str(exc), tool_calls_made=kernel.tool_call_counter[0],
-                                 duration=round(time.monotonic() - exec_start, 2))
+            fields = host_exception_fields(exc, failure_class="transport")
+            fields["tool_calls_made"] = kernel.tool_call_counter[0]
+            fields["duration_seconds"] = round(time.monotonic() - exec_start, 2)
+            rendered = dumps_result(place_failure_fields({"status": "error"}, fields))
+        else:
+            try:
+                result = _cell_result(
+                    kernel, key, status, payload,
+                    timeout=timeout, sandbox_tools=sandbox_tools, reused=reused,
+                    state_reset=state_reset, exec_start=exec_start,
+                )
+                from tools.code_execution_errors import dumps_result
+                rendered = dumps_result(result)
+            except Exception as exc:
+                # The cell already finished. Keep its command failure if it had one,
+                # and do not tear the kernel down for a formatting error.
+                from tools.code_execution_errors import (
+                    dumps_result, place_failure_fields, postprocessing_failure_fields,
+                )
+                logger.error(
+                    "session kernel postprocessing failed: %s: %s",
+                    type(exc).__name__, exc, exc_info=True,
+                )
+                fields = postprocessing_failure_fields(exc, payload if isinstance(payload, dict) else None)
+                fields["tool_calls_made"] = kernel.tool_call_counter[0]
+                fields["duration_seconds"] = round(time.monotonic() - exec_start, 2)
+                rendered = dumps_result(place_failure_fields({"status": "error"}, fields))
         finally:
             # The cell has settled on every path: its tool authority retires with it, so
             # nothing the cell left running can dispatch under it.
             authority.retire()
+    return rendered

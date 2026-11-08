@@ -1692,7 +1692,10 @@ def _run_conversation_turn(
     # by the transforms live now (a plugin reload mid-turn cannot drop them before the final). Set
     # before any exit, so an early one never reads the previous turn's hold.
     agent._held_transforms = held_stream_transforms()
-    agent._hold_stream = bool(agent._held_transforms)
+    # The email check rewrites the final reply. Hold the stream while it is on so a
+    # claim is not delivered before that rewrite. Unreadable config leaves the guard off.
+    from agent.external_email_guard import completion_guard_enabled
+    agent._hold_stream = bool(agent._held_transforms) or completion_guard_enabled()
 
     # Per-turn setup: build_turn_context mutates ``agent`` and returns the locals the loop reads.
     try:
